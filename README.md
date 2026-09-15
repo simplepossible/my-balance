@@ -1,4 +1,4 @@
-# My Balance Sheet
+# My Balance
 
 A simple local app for tracking money in, money out, and the net result for a chosen month.
 
