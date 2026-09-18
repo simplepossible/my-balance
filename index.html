@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
       rel="stylesheet"
     />
     <link rel="stylesheet" href="styles.css" />
@@ -28,18 +28,18 @@
           </svg>
           Inflows
         </button>
-        <button class="tab tab-center is-active" data-tab="finance" type="button">
+        <button class="tab tab-center" data-tab="expenses" type="button">
+          <svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M5 12h14" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" />
+          </svg>
+          Outflows
+        </button>
+        <button class="tab is-active" data-tab="finance" type="button">
           <svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true">
             <circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2.4" />
             <circle cx="12" cy="12" r="2.4" fill="currentColor" />
           </svg>
           Net
-        </button>
-        <button class="tab" data-tab="expenses" type="button">
-          <svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M5 12h14" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" />
-          </svg>
-          Outflows
         </button>
       </nav>
     </div>

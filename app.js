@@ -1,31 +1,16 @@
-const STORAGE_KEY = "my-balance-sheet-v1";
+const STORAGE_KEY = "my-balance-sheet-v2";
 
 const TITLES = {
   income: { eyebrow: "Money in", title: "Inflows" },
-  finance: { eyebrow: "Balance sheet", title: "Net" },
+  finance: { eyebrow: "This month", title: "Net" },
   expenses: { eyebrow: "Money out", title: "Outflows" },
 };
 
 const money = new Intl.NumberFormat(undefined, {
   style: "currency",
   currency: "EUR",
-  maximumFractionDigits: 2,
+  maximumFractionDigits: 0,
 });
-
-function uid() {
-  return crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random());
-}
-
-function nowLocal() {
-  return new Date();
-}
-
-function todayISO() {
-  const d = nowLocal();
-  const month = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${d.getFullYear()}-${month}-${day}`;
-}
 
 const MONTH_NAMES = [
   "January",
@@ -42,19 +27,64 @@ const MONTH_NAMES = [
   "December",
 ];
 
-function normalizeIncome(item) {
-  let category = item.category;
-  if (category === "salary") category = "earned";
-  if (category === "irregular") category = "extraordinary";
-  const recurring =
-    category === "earned" || (category === "investment" && Boolean(item.recurring));
-  return { ...item, category, recurring };
+function nowLocal() {
+  return new Date();
 }
 
-function normalizeExpense(item) {
-  let kind = item.kind;
-  if (kind === "one-off") kind = "variable";
-  return { ...item, kind };
+function defaultCategories() {
+  return [
+    { id: "rent", name: "Rent", kind: "fixed", custom: false },
+    { id: "insurance", name: "Insurance", kind: "fixed", custom: false },
+    { id: "phone", name: "Phone", kind: "fixed", custom: false },
+    { id: "food", name: "Food", kind: "flexible", custom: false },
+    { id: "leisure", name: "Leisure", kind: "flexible", custom: false },
+    { id: "other", name: "Other", kind: "flexible", custom: false },
+  ];
+}
+
+function uid() {
+  return crypto.randomUUID ? crypto.randomUUID() : `c-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function emptyState() {
+  return {
+    blockedMonthly: 0,
+    extrasByPeriod: {},
+    flexibleBudgetByPeriod: {},
+    fixedById: {},
+    spentByPeriod: {},
+    categories: defaultCategories(),
+  };
+}
+
+function normalizeExtra(item) {
+  if (!item || typeof item !== "object") return null;
+  return {
+    id: String(item.id || uid()),
+    note: String(item.note || ""),
+    amount: Number(item.amount) || 0,
+  };
+}
+
+function migrateExtras(parsed) {
+  const extrasByPeriod = {};
+  const incoming = parsed.extrasByPeriod && typeof parsed.extrasByPeriod === "object" ? parsed.extrasByPeriod : {};
+  Object.entries(incoming).forEach(([key, list]) => {
+    extrasByPeriod[key] = Array.isArray(list) ? list.map(normalizeExtra).filter(Boolean) : [];
+  });
+
+  const oldAmounts = parsed.extraByPeriod && typeof parsed.extraByPeriod === "object" ? parsed.extraByPeriod : {};
+  const oldNotes = parsed.extraNoteByPeriod && typeof parsed.extraNoteByPeriod === "object" ? parsed.extraNoteByPeriod : {};
+  const oldKeys = new Set([...Object.keys(oldAmounts), ...Object.keys(oldNotes)]);
+  oldKeys.forEach((key) => {
+    if (extrasByPeriod[key] && extrasByPeriod[key].length) return;
+    const amount = Number(oldAmounts[key]) || 0;
+    const note = String(oldNotes[key] || "").trim();
+    if (!amount && !note) return;
+    extrasByPeriod[key] = [{ id: uid(), note, amount }];
+  });
+
+  return extrasByPeriod;
 }
 
 function loadState() {
@@ -62,20 +92,24 @@ function loadState() {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return emptyState();
     const parsed = JSON.parse(raw);
+    const base = emptyState();
     return {
-      incomes: Array.isArray(parsed.incomes) ? parsed.incomes.map(normalizeIncome) : [],
-      expenses: Array.isArray(parsed.expenses) ? parsed.expenses.map(normalizeExpense) : [],
+      blockedMonthly: Number(parsed.blockedMonthly) || 0,
+      extrasByPeriod: migrateExtras(parsed),
+      flexibleBudgetByPeriod:
+        parsed.flexibleBudgetByPeriod && typeof parsed.flexibleBudgetByPeriod === "object"
+          ? parsed.flexibleBudgetByPeriod
+          : {},
+      fixedById: parsed.fixedById && typeof parsed.fixedById === "object" ? parsed.fixedById : {},
+      spentByPeriod: parsed.spentByPeriod && typeof parsed.spentByPeriod === "object" ? parsed.spentByPeriod : {},
+      categories: Array.isArray(parsed.categories) && parsed.categories.length ? parsed.categories : base.categories,
     };
   } catch {
     return emptyState();
   }
 }
 
-function emptyState() {
-  return { incomes: [], expenses: [] };
-}
-
-function saveState(state) {
+function saveState() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
 }
 
@@ -84,44 +118,20 @@ let tab = "finance";
 const now = nowLocal();
 let period = { year: now.getFullYear(), month: now.getMonth() };
 
-function monthlyFromFrequency(amount, frequency) {
-  const n = Number(amount) || 0;
-  if (frequency === "weekly") return (n * 52) / 12;
-  if (frequency === "yearly") return n / 12;
-  return n;
-}
-
-function parseISODate(isoDate) {
-  if (!isoDate) return null;
-  const d = new Date(`${isoDate}T00:00:00`);
-  return Number.isNaN(d.getTime()) ? null : d;
-}
-
-function inSelectedPeriod(isoDate) {
-  const d = parseISODate(isoDate);
-  if (!d) return false;
-  return d.getFullYear() === period.year && d.getMonth() === period.month;
+function periodKey() {
+  return `${period.year}-${String(period.month + 1).padStart(2, "0")}`;
 }
 
 function periodLabel() {
-  return `${MONTH_NAMES[period.month]} <span class="num">${period.year}</span>`;
-}
-
-function formatMoney(value) {
-  return `<span class="num">${money.format(value)}</span>`;
-}
-
-function formatDate(iso) {
-  return iso ? `<span class="num">${iso}</span>` : "";
+  return `${MONTH_NAMES[period.month]} ${period.year}`;
 }
 
 function yearOptions() {
   const currentYear = nowLocal().getFullYear();
   const years = [];
-  for (let year = currentYear - 10; year <= currentYear + 2; year += 1) {
+  for (let year = currentYear - 2; year <= currentYear + 1; year += 1) {
     years.push(year);
   }
-  if (!years.includes(period.year)) years.unshift(period.year);
   return years
     .map((year) => `<option value="${year}" ${year === period.year ? "selected" : ""}>${year}</option>`)
     .join("");
@@ -133,82 +143,78 @@ function monthOptions() {
   ).join("");
 }
 
-function summarize(current) {
-  let recurringIncome = 0;
-  let thisMonthIrregular = 0;
-  const incomeByCategory = { earned: 0, investment: 0, extraordinary: 0 };
+function extrasThisMonth() {
+  const list = state.extrasByPeriod[periodKey()];
+  return Array.isArray(list) ? list : [];
+}
 
-  for (const item of current.incomes) {
-    const amount = Number(item.amount) || 0;
-    const category = item.category === "earned" || item.category === "investment" || item.category === "extraordinary"
-      ? item.category
-      : "extraordinary";
-    if (category === "earned") {
-      recurringIncome += amount;
-      incomeByCategory.earned += amount;
-    } else if (category === "investment" && item.recurring) {
-      recurringIncome += amount;
-      incomeByCategory.investment += amount;
-    } else if (inSelectedPeriod(item.date)) {
-      thisMonthIrregular += amount;
-      if (category === "investment") incomeByCategory.investment += amount;
-      else incomeByCategory.extraordinary += amount;
-    }
+function extraThisMonth() {
+  return extrasThisMonth().reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
+}
+
+function extraNotesThisMonth() {
+  return extrasThisMonth()
+    .map((item) => String(item.note || "").trim())
+    .filter(Boolean)
+    .join(", ");
+}
+
+function flexibleBudgetThisMonth() {
+  const key = periodKey();
+  if (state.flexibleBudgetByPeriod[key] === "" || state.flexibleBudgetByPeriod[key] == null) {
+    return null;
   }
+  return Number(state.flexibleBudgetByPeriod[key]) || 0;
+}
 
-  let fixedExpenses = 0;
-  let subscriptionExpenses = 0;
-  let variableExpenses = 0;
+function spentThisMonth(id) {
+  const bag = state.spentByPeriod[periodKey()] || {};
+  return Number(bag[id]) || 0;
+}
 
-  for (const item of current.expenses) {
-    const amount = Number(item.amount) || 0;
-    if (item.kind === "fixed") {
-      fixedExpenses += amount;
-    } else if (item.kind === "subscription") {
-      subscriptionExpenses += monthlyFromFrequency(amount, item.frequency);
-    } else if (inSelectedPeriod(item.date)) {
-      variableExpenses += amount;
-    }
-  }
+function fixedAmount(id) {
+  return Number(state.fixedById[id]) || 0;
+}
 
-  const monthlyIncome = recurringIncome + thisMonthIrregular;
-  const monthlyExpenses = fixedExpenses + subscriptionExpenses + variableExpenses;
-  const monthlyNet = monthlyIncome - monthlyExpenses;
+function summarize() {
+  const income = (Number(state.blockedMonthly) || 0) + extraThisMonth();
+  const fixedCats = state.categories.filter((item) => item.kind === "fixed");
+  const flexCats = state.categories.filter((item) => item.kind === "flexible");
+  const fixedTotal = fixedCats.reduce((sum, item) => sum + fixedAmount(item.id), 0);
+  const flexibleSpent = flexCats.reduce((sum, item) => sum + spentThisMonth(item.id), 0);
+  const expenses = fixedTotal + flexibleSpent;
+  const leftover = income - fixedTotal;
+  const flexBudget = flexibleBudgetThisMonth();
+  const budget = flexBudget == null ? Math.max(leftover, 0) : flexBudget;
+  const overBudget = flexibleSpent > budget && budget >= 0;
 
   return {
-    recurringIncome,
-    thisMonthIrregular,
-    incomeByCategory,
-    fixedExpenses,
-    subscriptionExpenses,
-    variableExpenses,
-    monthlyIncome,
-    monthlyExpenses,
-    monthlyNet,
+    income,
+    extra: extraThisMonth(),
+    blocked: Number(state.blockedMonthly) || 0,
+    fixedTotal,
+    flexibleSpent,
+    expenses,
+    net: income - expenses,
+    leftover,
+    budget,
+    remainingFlexible: budget - flexibleSpent,
+    overBudget,
+    fixedCats,
+    flexCats,
   };
 }
 
-function categoryLabel(category) {
-  if (category === "earned") return "Earned Income";
-  if (category === "investment") return "Investment Income";
-  return "Extraordinary Income";
+function formatMoney(value) {
+  return `<span class="num">${money.format(value)}</span>`;
 }
 
-function expenseMeta(item) {
-  if (item.kind === "fixed") return `Fixed Expenses · ${formatDate(item.date)}`;
-  if (item.kind === "subscription") return `Subscriptions · ${item.frequency}`;
-  return `Variable Expenses · ${item.date ? formatDate(item.date) : "no date"}`;
-}
-
-function typePick(name, value, checked, title, description) {
+function amountField(name, value, extra = "") {
   return `
-    <label class="type-pick">
-      <input type="radio" name="${name}" value="${value}" ${checked ? "checked" : ""} />
-      <span class="type-pick-copy">
-        <span class="type-pick-title">${title}</span>
-        <span class="type-pick-desc">${description}</span>
-      </span>
-    </label>
+    <span class="amount-field">
+      <input name="${name}" type="number" min="0" step="1" inputmode="decimal" value="${value || 0}" ${extra} />
+      <span class="amount-suffix" aria-hidden="true">€</span>
+    </span>
   `;
 }
 
@@ -226,169 +232,141 @@ function render() {
   bindScreenEvents();
 }
 
-function incomeScreen() {
-  const rows = state.incomes
-    .slice()
-    .reverse()
-    .map(
-      (item) => `
-        <article class="item">
-          <div class="name">${escapeHtml(item.name)}</div>
-          <div class="amount positive">${formatMoney(item.amount)}</div>
-          <button class="btn btn-ghost" data-delete-income="${item.id}" type="button">Delete</button>
-          <div class="meta">${categoryLabel(item.category)}${item.category === "investment" && item.recurring ? " · monthly" : ""} · ${formatDate(item.date)}</div>
-        </article>
-      `
-    )
-    .join("");
-
+function extraRow(item) {
   return `
-    <section class="card">
-      <h2>Add inflow</h2>
+    <div class="cat-row extra-row">
+      <input class="cat-name" data-extra-note="${item.id}" maxlength="40" placeholder="e.g. parents, job" value="${escapeHtml(item.note)}" />
+      ${amountField(`extra-${item.id}`, item.amount, `data-extra-amount="${item.id}"`)}
+      <button class="btn-remove" type="button" data-remove-extra="${item.id}" aria-label="Remove extra">×</button>
+    </div>
+  `;
+}
+
+function incomeScreen() {
+  const s = summarize();
+  const extras = extrasThisMonth();
+  return `
+    <section class="card fill">
       <form id="income-form">
-        <label>Description
-          <input name="name" required maxlength="80" placeholder="e.g. Salary, dividends, tax refund" />
-        </label>
-        <div class="form-row">
-          <label>Amount
-            <span class="amount-field">
-              <input name="amount" type="number" min="0" step="0.01" required />
-              <span class="amount-suffix" aria-hidden="true">€</span>
-            </span>
-          </label>
-          <label>Date
-            <input name="date" type="date" required value="${todayISO()}" />
-          </label>
+        <div class="cat-row">
+          <span class="cat-label title">Monthly payout</span>
+          ${amountField("blockedMonthly", state.blockedMonthly)}
+          <span class="btn-remove-spacer"></span>
         </div>
-        <fieldset class="type-picks">
-          <legend>Type</legend>
-          ${typePick("category", "earned", true, "Earned Income", "such as salaries, wages, and performance bonuses")}
-          ${typePick("category", "investment", false, "Investment Income", "such as dividends, stock gains, and rental income")}
-          ${typePick("category", "extraordinary", false, "Extraordinary Income", "such as tax refunds, gift money, or selling personal items")}
-        </fieldset>
-        <label id="investment-recurring-wrap" hidden>
-          <span>Investment cadence</span>
-          <select name="investmentCadence">
-            <option value="one-off">One-off</option>
-            <option value="monthly">Recurring monthly</option>
-          </select>
-        </label>
-        <p class="hint">Earned income and recurring investment income count every month. Extraordinary income counts only in the month of the date.</p>
-        <button class="btn btn-income" type="submit">Save inflow</button>
+        <div class="block">
+          <div class="section-head">
+            <h2>Extra this month</h2>
+            <button class="btn-add" type="button" data-add-extra>+ Add</button>
+          </div>
+          ${extras.length ? extras.map(extraRow).join("") : `<p class="lead">No extras yet.</p>`}
+        </div>
       </form>
-    </section>
-    <section class="card">
-      <h2>Recorded inflows</h2>
-      ${rows ? `<div class="list">${rows}</div>` : `<p class="empty">No inflows recorded yet.</p>`}
+      <div class="summary-line">
+        <span class="positive available">Available in ${periodLabel()}</span>
+        <strong class="positive">${formatMoney(s.income)}</strong>
+      </div>
     </section>
   `;
 }
 
+function categoryRow(item, mode) {
+  const value = mode === "fixed" ? fixedAmount(item.id) : spentThisMonth(item.id);
+  const field = mode === "fixed" ? "fixed" : "spent";
+  const nameCell = item.custom
+    ? `<input class="cat-name" data-name="${item.id}" maxlength="24" value="${escapeHtml(item.name)}" />`
+    : `<span class="cat-label">${escapeHtml(item.name)}</span>`;
+  const remove = item.custom
+    ? `<button class="btn-remove" type="button" data-remove="${item.id}" aria-label="Remove ${escapeHtml(item.name)}">×</button>`
+    : `<span class="btn-remove-spacer"></span>`;
+  return `
+    <div class="cat-row">
+      ${nameCell}
+      ${amountField(`${field}-${item.id}`, value, `data-${field}="${item.id}"`)}
+      ${remove}
+    </div>
+  `;
+}
+
 function expensesScreen() {
-  const rows = state.expenses
-    .slice()
-    .reverse()
-    .map(
-      (item) => `
-        <article class="item">
-          <div class="name">${escapeHtml(item.name)}</div>
-          <div class="amount negative">${formatMoney(item.amount)}</div>
-          <button class="btn btn-ghost" data-delete-expense="${item.id}" type="button">Delete</button>
-          <div class="meta">${expenseMeta(item)}</div>
-        </article>
-      `
-    )
-    .join("");
+  const s = summarize();
+  const budgetValue = flexibleBudgetThisMonth();
+  const statusClass = s.overBudget ? "negative" : "positive";
+  const statusText = s.overBudget
+    ? `Over budget by ${money.format(Math.abs(s.remainingFlexible))}`
+    : `${money.format(s.remainingFlexible)} left in flexible budget`;
 
   return `
-    <section class="card">
-      <h2>Add outflow</h2>
+    <section class="card fill">
       <form id="expense-form">
-        <label>Description
-          <input name="name" required maxlength="80" placeholder="e.g. Rent, Netflix, car repair" />
-        </label>
-        <div class="form-row">
-          <label>Amount
-            <span class="amount-field">
-              <input name="amount" type="number" min="0" step="0.01" required />
-              <span class="amount-suffix" aria-hidden="true">€</span>
-            </span>
-          </label>
-          <label>Date
-            <input name="date" type="date" required value="${todayISO()}" />
-          </label>
+        <div class="block">
+          <div class="section-head">
+            <h2>Fixed</h2>
+            <button class="btn-add" type="button" data-add="fixed">+ Add</button>
+          </div>
+          ${s.fixedCats.map((item) => categoryRow(item, "fixed")).join("")}
         </div>
-        <fieldset class="type-picks">
-          <legend>Type</legend>
-          ${typePick("kind", "fixed", true, "Fixed Expenses", "such as rent/mortgage, phone contracts, insurance premiums")}
-          ${typePick("kind", "subscription", false, "Subscriptions", "such as Netflix, Spotify, and gym memberships")}
-          ${typePick("kind", "variable", false, "Variable Expenses", "such as car repair, flight ticket, and medical bill")}
-        </fieldset>
-        <label id="frequency-wrap" hidden>
-          Frequency
-          <select name="frequency">
-            <option value="weekly">Weekly</option>
-            <option value="monthly" selected>Monthly</option>
-            <option value="yearly">Yearly</option>
-          </select>
-        </label>
-        <p class="hint">Fixed expenses count every month. Subscriptions stay active until you delete them. Variable expenses count only in the month of the date.</p>
-        <button class="btn btn-expense" type="submit">Save outflow</button>
+        <div class="block">
+          <div class="section-head">
+            <h2>Flexible</h2>
+            <button class="btn-add" type="button" data-add="flexible">+ Add</button>
+          </div>
+          <div class="cat-row">
+            <span class="cat-label">Flexible budget</span>
+            ${amountField("flexibleBudget", budgetValue == null ? s.budget : budgetValue)}
+            <span class="btn-remove-spacer"></span>
+          </div>
+          ${s.flexCats.map((item) => categoryRow(item, "flexible")).join("")}
+        </div>
       </form>
-    </section>
-    <section class="card">
-      <h2>Recorded outflows</h2>
-      ${rows ? `<div class="list">${rows}</div>` : `<p class="empty">No outflows recorded yet.</p>`}
+      <div class="summary-line">
+        <span class="title">Total outflows</span>
+        <strong class="negative">${formatMoney(s.expenses)}</strong>
+      </div>
+      <p class="status ${statusClass}">${statusText}</p>
     </section>
   `;
 }
 
 function financeScreen() {
-  const s = summarize(state);
-  const netClass = s.monthlyNet > 0 ? "positive" : s.monthlyNet < 0 ? "negative" : "neutral";
+  const s = summarize();
+  const netClass = s.net > 0 ? "positive" : s.net < 0 ? "negative" : "neutral";
+  const flexClass = s.overBudget ? "negative" : "positive";
 
   return `
-    <section class="card">
-      <h2>Period</h2>
+    <section class="card fill">
       <form id="period-form" class="period-row">
         <label>Month
-          <select name="month" id="period-month">${monthOptions()}</select>
+          <select name="month">${monthOptions()}</select>
         </label>
         <label>Year
-          <select name="year" id="period-year">${yearOptions()}</select>
+          <select name="year">${yearOptions()}</select>
         </label>
       </form>
       <div class="hero-grid">
         <div class="stat">
           <span class="label">Gross Income</span>
-          <span class="value positive">${formatMoney(s.monthlyIncome)}</span>
+          <span class="value positive">${formatMoney(s.income)}</span>
         </div>
         <div class="stat">
           <span class="label">Total Expenses</span>
-          <span class="value negative">${formatMoney(s.monthlyExpenses)}</span>
+          <span class="value negative">${formatMoney(s.expenses)}</span>
         </div>
         <div class="stat wide">
-          <span class="label">Net Income · ${periodLabel()}</span>
-          <span class="value ${netClass}">${formatMoney(s.monthlyNet)}</span>
+          <span class="label">Net Income</span>
+          <span class="value ${netClass}">${formatMoney(s.net)}</span>
         </div>
       </div>
-      <p class="hint">Defaults to today (${formatDate(todayISO())}). Recurring items count in every selected month; extraordinary inflows and variable outflows count only in their date’s month.</p>
-    </section>
-    <section class="card">
-      <h2>Inflow mix</h2>
       <div class="breakdown">
-        <div class="row"><span>Earned Income</span><span class="positive">${formatMoney(s.incomeByCategory.earned)}</span></div>
-        <div class="row"><span>Investment Income (${periodLabel()})</span><span class="positive">${formatMoney(s.incomeByCategory.investment)}</span></div>
-        <div class="row"><span>Extraordinary Income (${periodLabel()})</span><span class="positive">${formatMoney(s.incomeByCategory.extraordinary)}</span></div>
+        <div class="row"><span>Monthly payout</span><span class="positive">${formatMoney(s.blocked)}</span></div>
+        <div class="row"><span>Extra${extraNotesThisMonth() ? ` · ${escapeHtml(extraNotesThisMonth())}` : ""}</span><span class="positive">${formatMoney(s.extra)}</span></div>
+        <div class="row"><span>Fixed costs</span><span class="negative">${formatMoney(s.fixedTotal)}</span></div>
+        <div class="row"><span>Flexible spent</span><span class="negative">${formatMoney(s.flexibleSpent)}</span></div>
       </div>
-    </section>
-    <section class="card">
-      <h2>Outflow mix</h2>
-      <div class="breakdown">
-        <div class="row"><span>Fixed Expenses</span><span class="negative">${formatMoney(s.fixedExpenses)}</span></div>
-        <div class="row"><span>Subscriptions (monthly equivalent)</span><span class="negative">${formatMoney(s.subscriptionExpenses)}</span></div>
-        <div class="row"><span>Variable Expenses (${periodLabel()})</span><span class="negative">${formatMoney(s.variableExpenses)}</span></div>
-      </div>
+      <p class="status ${flexClass}">${
+        s.overBudget
+          ? `Flexible expenses exceed budget by ${money.format(Math.abs(s.remainingFlexible))}`
+          : `Flexible budget OK · ${money.format(s.remainingFlexible)} remaining`
+      }</p>
     </section>
   `;
 }
@@ -401,54 +379,63 @@ function escapeHtml(value) {
     .replaceAll('"', "&quot;");
 }
 
-function selectedRadioValue(form, name) {
-  const checked = form.querySelector(`input[name="${name}"]:checked`);
-  return checked ? checked.value : "";
+function numberFrom(form, name) {
+  return Number(new FormData(form).get(name)) || 0;
 }
 
 function bindScreenEvents() {
   const periodForm = document.getElementById("period-form");
   if (periodForm) {
-    const syncPeriod = () => {
+    periodForm.addEventListener("change", () => {
       const data = new FormData(periodForm);
       period = {
         month: Number(data.get("month")),
         year: Number(data.get("year")),
       };
       render();
-    };
-    periodForm.addEventListener("change", syncPeriod);
+    });
   }
 
   const incomeForm = document.getElementById("income-form");
   if (incomeForm) {
-    const wrap = document.getElementById("investment-recurring-wrap");
-    const sync = () => {
-      wrap.hidden = selectedRadioValue(incomeForm, "category") !== "investment";
-    };
-    incomeForm.querySelectorAll('input[name="category"]').forEach((input) => {
-      input.addEventListener("change", sync);
-    });
-    sync();
-    incomeForm.addEventListener("submit", (event) => {
-      event.preventDefault();
-      const data = new FormData(incomeForm);
-      const categoryValue = String(data.get("category"));
-      state.incomes.push({
-        id: uid(),
-        name: String(data.get("name")).trim(),
-        amount: Number(data.get("amount")),
-        date: String(data.get("date")),
-        category: categoryValue,
-        recurring: categoryValue === "earned" || (categoryValue === "investment" && data.get("investmentCadence") === "monthly"),
+    const persist = () => {
+      state.blockedMonthly = numberFrom(incomeForm, "blockedMonthly");
+      const extras = extrasThisMonth().map((item) => {
+        const noteInput = incomeForm.querySelector(`[data-extra-note="${item.id}"]`);
+        const amountInput = incomeForm.querySelector(`[data-extra-amount="${item.id}"]`);
+        return {
+          id: item.id,
+          note: noteInput ? noteInput.value : item.note,
+          amount: amountInput ? Number(amountInput.value) || 0 : item.amount,
+        };
       });
-      saveState(state);
-      render();
-    });
-    document.querySelectorAll("[data-delete-income]").forEach((button) => {
+      state.extrasByPeriod[periodKey()] = extras;
+      saveState();
+      const s = summarize();
+      const line = incomeForm.parentElement.querySelector(".summary-line strong");
+      if (line) line.innerHTML = formatMoney(s.income);
+    };
+    incomeForm.addEventListener("input", persist);
+    const addExtra = incomeForm.querySelector("[data-add-extra]");
+    if (addExtra) {
+      addExtra.addEventListener("click", () => {
+        persist();
+        const list = extrasThisMonth();
+        list.push({ id: uid(), note: "", amount: 0 });
+        state.extrasByPeriod[periodKey()] = list;
+        saveState();
+        render();
+        const notes = document.querySelectorAll("[data-extra-note]");
+        const last = notes[notes.length - 1];
+        if (last) last.focus();
+      });
+    }
+    incomeForm.querySelectorAll("[data-remove-extra]").forEach((button) => {
       button.addEventListener("click", () => {
-        state.incomes = state.incomes.filter((item) => item.id !== button.dataset.deleteIncome);
-        saveState(state);
+        persist();
+        const id = button.dataset.removeExtra;
+        state.extrasByPeriod[periodKey()] = extrasThisMonth().filter((item) => item.id !== id);
+        saveState();
         render();
       });
     });
@@ -456,33 +443,57 @@ function bindScreenEvents() {
 
   const expenseForm = document.getElementById("expense-form");
   if (expenseForm) {
-    const wrap = document.getElementById("frequency-wrap");
-    const sync = () => {
-      wrap.hidden = selectedRadioValue(expenseForm, "kind") !== "subscription";
-    };
-    expenseForm.querySelectorAll('input[name="kind"]').forEach((input) => {
-      input.addEventListener("change", sync);
-    });
-    sync();
-    expenseForm.addEventListener("submit", (event) => {
-      event.preventDefault();
-      const data = new FormData(expenseForm);
-      const kindValue = String(data.get("kind"));
-      state.expenses.push({
-        id: uid(),
-        name: String(data.get("name")).trim(),
-        amount: Number(data.get("amount")),
-        date: String(data.get("date")),
-        kind: kindValue,
-        frequency: kindValue === "subscription" ? String(data.get("frequency")) : null,
+    const persist = () => {
+      state.flexibleBudgetByPeriod[periodKey()] = numberFrom(expenseForm, "flexibleBudget");
+      expenseForm.querySelectorAll("[data-name]").forEach((input) => {
+        const cat = state.categories.find((item) => item.id === input.dataset.name);
+        if (cat) cat.name = input.value.trim() || "Category";
       });
-      saveState(state);
-      render();
-    });
-    document.querySelectorAll("[data-delete-expense]").forEach((button) => {
+      expenseForm.querySelectorAll("[data-fixed]").forEach((input) => {
+        state.fixedById[input.dataset.fixed] = Number(input.value) || 0;
+      });
+      const spent = { ...(state.spentByPeriod[periodKey()] || {}) };
+      expenseForm.querySelectorAll("[data-spent]").forEach((input) => {
+        spent[input.dataset.spent] = Number(input.value) || 0;
+      });
+      state.spentByPeriod[periodKey()] = spent;
+      saveState();
+      const s = summarize();
+      const total = expenseForm.parentElement.querySelector(".summary-line strong");
+      if (total) total.innerHTML = formatMoney(s.expenses);
+      const status = expenseForm.parentElement.querySelector(".status");
+      if (status) {
+        status.className = `status ${s.overBudget ? "negative" : "positive"}`;
+        status.textContent = s.overBudget
+          ? `Over budget by ${money.format(Math.abs(s.remainingFlexible))}`
+          : `${money.format(s.remainingFlexible)} left in flexible budget`;
+      }
+    };
+    expenseForm.addEventListener("input", persist);
+    expenseForm.querySelectorAll("[data-add]").forEach((button) => {
       button.addEventListener("click", () => {
-        state.expenses = state.expenses.filter((item) => item.id !== button.dataset.deleteExpense);
-        saveState(state);
+        persist();
+        const kind = button.dataset.add;
+        state.categories.push({
+          id: uid(),
+          name: kind === "fixed" ? "New fixed" : "New flexible",
+          kind,
+          custom: true,
+        });
+        saveState();
+        render();
+      });
+    });
+    expenseForm.querySelectorAll("[data-remove]").forEach((button) => {
+      button.addEventListener("click", () => {
+        persist();
+        const id = button.dataset.remove;
+        state.categories = state.categories.filter((item) => item.id !== id);
+        delete state.fixedById[id];
+        Object.keys(state.spentByPeriod).forEach((key) => {
+          if (state.spentByPeriod[key]) delete state.spentByPeriod[key][id];
+        });
+        saveState();
         render();
       });
     });
