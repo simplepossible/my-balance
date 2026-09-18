@@ -1,4 +1,4 @@
-# My Balance Sheet
+# My Balance
 
 A one-screen-per-tab money overview, built to fit an iPhone without scrolling.
 
